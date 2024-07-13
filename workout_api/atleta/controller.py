@@ -68,13 +68,13 @@ async def post(
     '/', 
     summary='Consultar todos os Atletas',
     status_code=status.HTTP_200_OK,
-    response_model=List[AtletaOut],
+    response_model=List[dict],
 )
 async def query(
     db_session: DatabaseDependency,
     nome: Optional[str] = Query(None, description='Filtrar por nome do atleta'),
     cpf: Optional[str] = Query(None, description='Filtrar por CPF do atleta')
-) -> List[AtletaOut]:
+) -> List[dict]:
     query = select(AtletaModel)
     
     if nome:
@@ -82,9 +82,28 @@ async def query(
     if cpf:
         query = query.filter(AtletaModel.cpf == cpf)
     
-    atletas: List[AtletaOut] = (await db_session.execute(query)).scalars().all()
+    atletas = await db_session.execute(query)
+    atletas_list = []
     
-    return [AtletaOut.model_validate(atleta) for atleta in atletas]
+    for atleta in atletas.scalars():
+        centro_treinamento = await db_session.execute(
+            select(CentroTreinamentoModel).filter_by(pk_id=atleta.centro_treinamento_id)
+        )
+        categoria = await db_session.execute(
+            select(CategoriaModel).filter_by(pk_id=atleta.categoria_id)
+        )
+        
+        atleta_dict = {
+            'id': atleta.id,
+            'nome': atleta.nome,
+            'centro_treinamento': centro_treinamento.scalars().first().nome,
+            'categoria': categoria.scalars().first().nome,
+            'created_at': atleta.created_at,
+        }
+        
+        atletas_list.append(atleta_dict)
+    
+    return atletas_list
 
 
 @router.get(
