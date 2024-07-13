@@ -3,6 +3,8 @@ from uuid import uuid4
 from typing import Optional, List
 from fastapi import APIRouter, Body, HTTPException, Query, status
 from pydantic import UUID4
+from fastapi_pagination import PaginationParams, Page
+from fastapi_pagination.ext.sqlalchemy import paginate
 
 from sqlalchemy.exc import IntegrityError, NoResultFound
 from workout_api.atleta.schemas import AtletaIn, AtletaOut, AtletaUpdate
@@ -90,13 +92,14 @@ async def post(
     '/', 
     summary='Consultar todos os Atletas',
     status_code=status.HTTP_200_OK,
-    response_model=List[dict],
+    response_model=Page[AtletaOut],
 )
 async def query(
     db_session: DatabaseDependency,
     nome: Optional[str] = Query(None, description='Filtrar por nome do atleta'),
-    cpf: Optional[str] = Query(None, description='Filtrar por CPF do atleta')
-) -> List[dict]:
+    cpf: Optional[str] = Query(None, description='Filtrar por CPF do atleta'),
+    params: PaginationParams = PaginationParams()
+) -> Page[AtletaOut]:
     query = select(AtletaModel)
     
     if nome:
@@ -104,41 +107,9 @@ async def query(
     if cpf:
         query = query.filter(AtletaModel.cpf == cpf)
     
-    try:
-        atletas = await db_session.execute(query)
-        atletas_list = []
-        
-        for atleta in atletas.scalars():
-            centro_treinamento = await db_session.execute(
-                select(CentroTreinamentoModel).filter_by(pk_id=atleta.centro_treinamento_id)
-            )
-            categoria = await db_session.execute(
-                select(CategoriaModel).filter_by(pk_id=atleta.categoria_id)
-            )
-            
-            atleta_dict = {
-                'id': atleta.id,
-                'nome': atleta.nome,
-                'centro_treinamento': centro_treinamento.scalars().first().nome,
-                'categoria': categoria.scalars().first().nome,
-                'created_at': atleta.created_at,
-            }
-            
-            atletas_list.append(atleta_dict)
-        
-        return atletas_list
+    atletas = await paginate(db_session, query, params=params)
     
-    except NoResultFound:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail='Nenhum registro encontrado.'
-        )
-    
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f'Ocorreu um erro inesperado: {str(e)}'
-        )
+    return atletas
 
 
 @router.get(
