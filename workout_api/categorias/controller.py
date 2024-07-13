@@ -1,9 +1,11 @@
 from uuid import uuid4
-from fastapi import APIRouter, Body, HTTPException, status
+from typing import List
+from fastapi import APIRouter, Body, HTTPException, Query, status
 from pydantic import UUID4
+from fastapi_pagination import PaginationParams, Page
+from sqlalchemy.exc import IntegrityError
 from workout_api.categorias.schemas import CategoriaIn, CategoriaOut
 from workout_api.categorias.models import CategoriaModel
-
 from workout_api.contrib.dependencies import DatabaseDependency
 from sqlalchemy.future import select
 
@@ -19,26 +21,47 @@ async def post(
     db_session: DatabaseDependency, 
     categoria_in: CategoriaIn = Body(...)
 ) -> CategoriaOut:
-    categoria_out = CategoriaOut(id=uuid4(), **categoria_in.model_dump())
-    categoria_model = CategoriaModel(**categoria_out.model_dump())
+    try:
+        categoria_out = CategoriaOut(id=str(uuid4()), **categoria_in.model_dump())
+        categoria_model = CategoriaModel(**categoria_out.model_dump())
+        
+        db_session.add(categoria_model)
+        await db_session.commit()
+        
+        return categoria_out
     
-    db_session.add(categoria_model)
-    await db_session.commit()
+    except IntegrityError as e:
+        # Verifica se a exceção ocorreu devido a violação de integridade
+        if "duplicate key value violates unique constraint" in str(e):
+            raise HTTPException(
+                status_code=status.HTTP_303_SEE_OTHER,
+                detail=f'Já existe uma categoria cadastrada com o nome: {categoria_in.nome}'
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail='Ocorreu um erro ao inserir os dados no banco'
+            )
 
-    return categoria_out
-    
-    
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f'Ocorreu um erro inesperado: {str(e)}'
+        )
+
 @router.get(
     '/', 
     summary='Consultar todas as Categorias',
     status_code=status.HTTP_200_OK,
-    response_model=list[CategoriaOut],
+    response_model=Page[CategoriaOut],
 )
-async def query(db_session: DatabaseDependency) -> list[CategoriaOut]:
-    categorias: list[CategoriaOut] = (await db_session.execute(select(CategoriaModel))).scalars().all()
-    
+async def query(
+    db_session: DatabaseDependency,
+    params: PaginationParams = PaginationParams()
+) -> Page[CategoriaOut]:
+    query = select(CategoriaModel)
+    categorias = await paginate(db_session, query, params=params)
     return categorias
-
 
 @router.get(
     '/{id}', 
