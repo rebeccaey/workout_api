@@ -1,6 +1,7 @@
 from datetime import datetime
 from uuid import uuid4
-from fastapi import APIRouter, Body, HTTPException, status
+from typing import Optional, List
+from fastapi import APIRouter, Body, HTTPException, Query, status
 from pydantic import UUID4
 
 from workout_api.atleta.schemas import AtletaIn, AtletaOut, AtletaUpdate
@@ -46,7 +47,7 @@ async def post(
             detail=f'O centro de treinamento {centro_treinamento_nome} não foi encontrado.'
         )
     try:
-        atleta_out = AtletaOut(id=uuid4(), created_at=datetime.utcnow(), **atleta_in.model_dump())
+        atleta_out = AtletaOut(id=str(uuid4()), created_at=datetime.utcnow(), **atleta_in.model_dump())
         atleta_model = AtletaModel(**atleta_out.model_dump(exclude={'categoria', 'centro_treinamento'}))
 
         atleta_model.categoria_id = categoria.pk_id
@@ -67,10 +68,21 @@ async def post(
     '/', 
     summary='Consultar todos os Atletas',
     status_code=status.HTTP_200_OK,
-    response_model=list[AtletaOut],
+    response_model=List[AtletaOut],
 )
-async def query(db_session: DatabaseDependency) -> list[AtletaOut]:
-    atletas: list[AtletaOut] = (await db_session.execute(select(AtletaModel))).scalars().all()
+async def query(
+    db_session: DatabaseDependency,
+    nome: Optional[str] = Query(None, description='Filtrar por nome do atleta'),
+    cpf: Optional[str] = Query(None, description='Filtrar por CPF do atleta')
+) -> List[AtletaOut]:
+    query = select(AtletaModel)
+    
+    if nome:
+        query = query.filter(AtletaModel.nome.ilike(f'%{nome}%'))
+    if cpf:
+        query = query.filter(AtletaModel.cpf == cpf)
+    
+    atletas: List[AtletaOut] = (await db_session.execute(query)).scalars().all()
     
     return [AtletaOut.model_validate(atleta) for atleta in atletas]
 
