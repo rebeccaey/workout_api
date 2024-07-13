@@ -4,6 +4,7 @@ from typing import Optional, List
 from fastapi import APIRouter, Body, HTTPException, Query, status
 from pydantic import UUID4
 
+from sqlalchemy.exc import IntegrityError, NoResultFound
 from workout_api.atleta.schemas import AtletaIn, AtletaOut, AtletaUpdate
 from workout_api.atleta.models import AtletaModel
 from workout_api.categorias.models import CategoriaModel
@@ -27,26 +28,27 @@ async def post(
     categoria_nome = atleta_in.categoria.nome
     centro_treinamento_nome = atleta_in.centro_treinamento.nome
 
-    categoria = (await db_session.execute(
-        select(CategoriaModel).filter_by(nome=categoria_nome))
-    ).scalars().first()
-    
-    if not categoria:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, 
-            detail=f'A categoria {categoria_nome} não foi encontrada.'
-        )
-    
-    centro_treinamento = (await db_session.execute(
-        select(CentroTreinamentoModel).filter_by(nome=centro_treinamento_nome))
-    ).scalars().first()
-    
-    if not centro_treinamento:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, 
-            detail=f'O centro de treinamento {centro_treinamento_nome} não foi encontrado.'
-        )
     try:
+        categoria = (await db_session.execute(
+            select(CategoriaModel).filter_by(nome=categoria_nome))
+        ).scalars().first()
+        
+        if not categoria:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, 
+                detail=f'A categoria {categoria_nome} não foi encontrada.'
+            )
+        
+        centro_treinamento = (await db_session.execute(
+            select(CentroTreinamentoModel).filter_by(nome=centro_treinamento_nome))
+        ).scalars().first()
+        
+        if not centro_treinamento:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, 
+                detail=f'O centro de treinamento {centro_treinamento_nome} não foi encontrado.'
+            )
+        
         atleta_out = AtletaOut(id=str(uuid4()), created_at=datetime.utcnow(), **atleta_in.model_dump())
         atleta_model = AtletaModel(**atleta_out.model_dump(exclude={'categoria', 'centro_treinamento'}))
 
@@ -55,10 +57,30 @@ async def post(
         
         db_session.add(atleta_model)
         await db_session.commit()
-    except Exception:
+        
+    except IntegrityError as e:
+        # Verifica se a exceção ocorreu devido a violação de integridade por CPF duplicado
+        if "duplicate key value violates unique constraint" in str(e):
+            raise HTTPException(
+                status_code=status.HTTP_303_SEE_OTHER,
+                detail=f'Já existe um atleta cadastrado com o CPF: {atleta_in.cpf}'
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail='Ocorreu um erro ao inserir os dados no banco'
+            )
+    
+    except NoResultFound:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
-            detail='Ocorreu um erro ao inserir os dados no banco'
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail='Registro não encontrado.'
+        )
+    
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f'Ocorreu um erro inesperado: {str(e)}'
         )
 
     return atleta_out
@@ -82,28 +104,41 @@ async def query(
     if cpf:
         query = query.filter(AtletaModel.cpf == cpf)
     
-    atletas = await db_session.execute(query)
-    atletas_list = []
-    
-    for atleta in atletas.scalars():
-        centro_treinamento = await db_session.execute(
-            select(CentroTreinamentoModel).filter_by(pk_id=atleta.centro_treinamento_id)
-        )
-        categoria = await db_session.execute(
-            select(CategoriaModel).filter_by(pk_id=atleta.categoria_id)
-        )
+    try:
+        atletas = await db_session.execute(query)
+        atletas_list = []
         
-        atleta_dict = {
-            'id': atleta.id,
-            'nome': atleta.nome,
-            'centro_treinamento': centro_treinamento.scalars().first().nome,
-            'categoria': categoria.scalars().first().nome,
-            'created_at': atleta.created_at,
-        }
+        for atleta in atletas.scalars():
+            centro_treinamento = await db_session.execute(
+                select(CentroTreinamentoModel).filter_by(pk_id=atleta.centro_treinamento_id)
+            )
+            categoria = await db_session.execute(
+                select(CategoriaModel).filter_by(pk_id=atleta.categoria_id)
+            )
+            
+            atleta_dict = {
+                'id': atleta.id,
+                'nome': atleta.nome,
+                'centro_treinamento': centro_treinamento.scalars().first().nome,
+                'categoria': categoria.scalars().first().nome,
+                'created_at': atleta.created_at,
+            }
+            
+            atletas_list.append(atleta_dict)
         
-        atletas_list.append(atleta_dict)
+        return atletas_list
     
-    return atletas_list
+    except NoResultFound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail='Nenhum registro encontrado.'
+        )
+    
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f'Ocorreu um erro inesperado: {str(e)}'
+        )
 
 
 @router.get(
@@ -113,17 +148,24 @@ async def query(
     response_model=AtletaOut,
 )
 async def get(id: UUID4, db_session: DatabaseDependency) -> AtletaOut:
-    atleta: AtletaOut = (
-        await db_session.execute(select(AtletaModel).filter_by(id=id))
-    ).scalars().first()
+    try:
+        atleta: AtletaOut = (
+            await db_session.execute(select(AtletaModel).filter_by(id=id))
+        ).scalars().first()
 
-    if not atleta:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, 
-            detail=f'Atleta não encontrado no id: {id}'
-        )
+        if not atleta:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, 
+                detail=f'Atleta não encontrado no id: {id}'
+            )
+        
+        return atleta
     
-    return atleta
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f'Ocorreu um erro inesperado: {str(e)}'
+        )
 
 
 @router.patch(
@@ -133,24 +175,37 @@ async def get(id: UUID4, db_session: DatabaseDependency) -> AtletaOut:
     response_model=AtletaOut,
 )
 async def patch(id: UUID4, db_session: DatabaseDependency, atleta_up: AtletaUpdate = Body(...)) -> AtletaOut:
-    atleta: AtletaOut = (
-        await db_session.execute(select(AtletaModel).filter_by(id=id))
-    ).scalars().first()
+    try:
+        atleta: AtletaOut = (
+            await db_session.execute(select(AtletaModel).filter_by(id=id))
+        ).scalars().first()
 
-    if not atleta:
+        if not atleta:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, 
+                detail=f'Atleta não encontrado no id: {id}'
+            )
+        
+        atleta_update = atleta_up.model_dump(exclude_unset=True)
+        for key, value in atleta_update.items():
+            setattr(atleta, key, value)
+
+        await db_session.commit()
+        await db_session.refresh(atleta)
+
+        return atleta
+    
+    except NoResultFound:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, 
-            detail=f'Atleta não encontrado no id: {id}'
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail='Registro não encontrado.'
         )
     
-    atleta_update = atleta_up.model_dump(exclude_unset=True)
-    for key, value in atleta_update.items():
-        setattr(atleta, key, value)
-
-    await db_session.commit()
-    await db_session.refresh(atleta)
-
-    return atleta
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f'Ocorreu um erro inesperado: {str(e)}'
+        )
 
 
 @router.delete(
@@ -159,15 +214,28 @@ async def patch(id: UUID4, db_session: DatabaseDependency, atleta_up: AtletaUpda
     status_code=status.HTTP_204_NO_CONTENT
 )
 async def delete(id: UUID4, db_session: DatabaseDependency) -> None:
-    atleta: AtletaOut = (
-        await db_session.execute(select(AtletaModel).filter_by(id=id))
-    ).scalars().first()
+    try:
+        atleta: AtletaOut = (
+            await db_session.execute(select(AtletaModel).filter_by(id=id))
+        ).scalars().first()
 
-    if not atleta:
+        if not atleta:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, 
+                detail=f'Atleta não encontrado no id: {id}'
+            )
+        
+        await db_session.delete(atleta)
+        await db_session.commit()
+    
+    except NoResultFound:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, 
-            detail=f'Atleta não encontrado no id: {id}'
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail='Registro não encontrado.'
         )
     
-    await db_session.delete(atleta)
-    await db_session.commit()
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f'Ocorreu um erro inesperado: {str(e)}'
+        )
